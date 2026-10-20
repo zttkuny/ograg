@@ -38,7 +38,11 @@ class RAGASTester:
         for m in self.metrics_names:
             if m in metric_map:
                 if metric_map[m] is not None:
-                    self.metrics.append(metric_map[m])
+                    metric = metric_map[m]
+                    if m == 'answer_relevancy' and 'deepseek' in str(getattr(self.llm, 'model_name', '')).lower():
+                        metric.strictness = 1
+                        print("DeepSeek does not support n>1; set answer_relevancy.strictness=1.")
+                    self.metrics.append(metric)
             else:
                 print(f"Warning: Metric {m} not found in ragas map.")
 

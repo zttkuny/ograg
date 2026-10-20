@@ -1,18 +1,19 @@
 model:
-  api_base: https://dashscope.aliyuncs.com/compatible-mode/v1
-  api_key: sk-0c7707325f5941e296f105479592a743
-  deployment_name: qwen3.5-plus # -32k
+  api_base: https://api.deepseek.com
+  api_key:
+  deployment_name: deepseek-flash
   api_type: openai
-  api_version: '2024-02-01' 
-  enable_thinking: True
-  # MODEL_NAME: gpt-4-32k
+  api_version: '2024-02-01'
+  enable_thinking: False
+  reasoning_effort: high
+  # deployment_name: deepseek-v4-pro
 
 embedding_model:
   api_base: https://dashscope.aliyuncs.com/compatible-mode/v1
-  api_key: sk-0c7707325f5941e296f105479592a743
+  api_key:
   deployment_name: text-embedding-v4 # sentence-transformers/all-mpnet-base-v2
   api_type: openai #huggingface
-  api_version: '2024-02-01' 
+  api_version: '2024-02-01'
 
 data:
   documents_dir: data/md/soybean

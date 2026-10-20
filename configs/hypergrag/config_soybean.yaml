@@ -1,14 +1,12 @@
 model:
-  api_base: 
-  api_key: 
-  # api_base: 
-  # api_key: 
-  # deployment_name: gpt-35-turbo-16k # -32k
-  deployment_name: gpt-4o
-  # deployment_name: gpt-4-32k # -32k
+  api_base: https://api.deepseek.com
+  api_key:
+  deployment_name: deepseek-flash
+  # deployment_name: deepseek-v4-pro
   api_type: openai
-  api_version: '2024-02-01' 
-  # MODEL_NAME: gpt-4-32k
+  api_version: '2024-02-01'
+  enable_thinking: False
+  reasoning_effort: high
 
 # model:
 #   RESOURCE_ENDPOINT: 
@@ -20,13 +18,11 @@ model:
 #   # MODEL_NAME: gpt-4-32k
 
 embedding_model:
-  api_base: 
-  api_key: 
-  # api_base: 
-  # api_key: 
-  deployment_name: text-embedding-3-small # sentence-transformers/all-mpnet-base-v2
-  api_type: openai #huggingface
-  api_version: '2024-02-01' 
+  api_base: https://dashscope.aliyuncs.com/compatible-mode/v1
+  api_key:
+  deployment_name: text-embedding-v4
+  api_type: openai
+  api_version: '2024-02-01'
 
 data:
   documents_dir: data/md/soybean

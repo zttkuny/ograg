@@ -74,6 +74,13 @@ def get_config(no_args=False):
             os.environ['OPENAI_API_KEY'] = api_keys['OPENAI_API_KEY']
             os.environ['GRAPHRAG_API_KEY'] = api_keys['OPENAI_API_KEY']
             os.environ['GRAPHRAG_LLM_API_KEY'] = api_keys['OPENAI_API_KEY']
+    elif config.model.deployment_name.startswith('deepseek'):
+        config.model.api_key = api_keys.get('DEEPSEEK_API_KEY') or config.model.get('api_key')
+        if config.model.api_key:
+            os.environ['DEEPSEEK_API_KEY'] = config.model.api_key
+        if not config.model.get('api_base'):
+            config.model.api_base = 'https://api.deepseek.com'
+        config.model.api_type = 'openai'
     elif 'llama' in config.model.deployment_name.lower():
         os.environ['TOGETHER_API_KEY'] = api_keys['TOGETHER_API_KEY']
         config.model.api_type = 'llama'
@@ -82,7 +89,8 @@ def get_config(no_args=False):
         # if 'AZURE_API_KEY' in api_keys and not args.force_personal_openai and not args.force_personal_openai_emb_only:
          # If config already has openai type and api_base (custom proxy), preserve it
         if config.embedding_model.get('api_type') == 'openai' and config.embedding_model.get('api_base'):
-            pass
+            if 'dashscope' in config.embedding_model.api_base and not config.embedding_model.get('api_key'):
+                config.embedding_model.api_key = api_keys.get('DASHSCOPE_API_KEY')
         elif 'AZURE_API_KEY' in api_keys and not args.force_personal_openai and not args.force_personal_openai_emb_only:
             print("DEBUG: Setting embedding to AZURE")
             config.embedding_model.api_key = api_keys['AZURE_API_KEY']

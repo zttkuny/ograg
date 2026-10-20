@@ -115,7 +115,7 @@ def load_llm_and_embeds(model_config: Dict[str, Any], embedding_config: Dict[str
     deployment_name = model_config.get('deployment_name') or os.getenv(model_config.get("deployment_name_env_var", ""))
 
     if api_type == 'openai' and resource_endpoint:
-        if model_config['enable_thinking']:
+        if model_config.get('enable_thinking', False):
                           model_kwargs={
                            "enable_thinking": True
                       }
@@ -123,6 +123,8 @@ def load_llm_and_embeds(model_config: Dict[str, Any], embedding_config: Dict[str
                         model_kwargs={
                               "enable_thinking": False
                         }
+        if model_config.get('reasoning_effort'):
+            model_kwargs['reasoning_effort'] = model_config['reasoning_effort']
         llm = ChatOpenAI(
             openai_api_key=api_key,
             openai_api_base=resource_endpoint,
@@ -150,7 +152,7 @@ def load_llm_and_embeds(model_config: Dict[str, Any], embedding_config: Dict[str
                     timeout=300.0,
                 )
             else:
-                if model_config['enable_thinking']:
+                if model_config.get('enable_thinking', False):
                           model_kwargs={
                            "enable_thinking": True
                       }
@@ -158,6 +160,8 @@ def load_llm_and_embeds(model_config: Dict[str, Any], embedding_config: Dict[str
                         model_kwargs={
                               "enable_thinking": False
                         }
+                if model_config.get('reasoning_effort'):
+                    model_kwargs['reasoning_effort'] = model_config['reasoning_effort']
                 llm = ChatOpenAI(
                     api_key=api_key,
                     model=deployment_name,
