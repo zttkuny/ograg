@@ -1,0 +1,49 @@
+model:
+  api_base: https://api.openai.com/v1
+  api_key: sk-5f9175b5f88f4608a1650a107aae0f64
+  deployment_name: deepseek-chat
+  api_type: openai
+  api_version: "2024-08-06"
+
+embedding_model:
+  api_base: https://api.openai.com/v1
+  api_key: sk-xxxxxxxxxxxxxxxx
+  deployment_name: text-embedding-ada-002
+  api_type: openai
+  api_version: "2024-08-06"
+
+data:
+  documents_dir: data/md/soybean
+  ontology_path: data/ontology/farm_cropcultivation_schema_ontology_jsonld.json
+  kg_storage_path: data/kg/soybean
+  index_dir: index_openai/vector_soybean
+  subdir: false
+  smart_pdf: true
+  chunk_size: 8192
+
+query:
+  framework: ontohypergraph-rag
+  batch_size: 10
+  mode: json
+  questions_file:
+
+question_generator:
+  framework: ontodocragas
+  test_size: 100
+  distr:
+    simple: 0
+    reasoning: 1
+    multi_context: 0
+
+evaluator:
+  reference_free: true
+  type: single
+  metrics:
+    - answer_correctness
+    - faithfulness
+    - answer_similarity
+    - answer_relevancy
+    - context_relevancy
+    - context_precision
+    - context_recall
+    - context_entity_recall

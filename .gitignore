@@ -1,0 +1,17 @@
+# secrets
+api_keys.yaml
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# generated data / outputs
+data/
+results/
+logs_*.out
+
+# misc
+.DS_Store

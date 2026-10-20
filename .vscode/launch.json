@@ -1,0 +1,42 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Debug test_answers.py (Soybean)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "test_answers.py",
+            "python": "/home/liqiankun/miniconda3/envs/ograg/bin/python",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args": [
+                "--config_file", "configs/config_soybean.yaml"
+            ],
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        },
+        {
+            "name": "Python: Debug Current File with Args",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "--config_file", "${input:configPath}"
+            ],
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        }
+    ],
+    "inputs": [
+        {
+            "id": "configPath",
+            "type": "promptString",
+            "description": "Enter the path to the config file (e.g. configs/config_soybean.yaml)",
+            "default": "configs/config_soybean.yaml"
+        }
+    ]
+}

@@ -1,0 +1,8 @@
+{
+  "python.defaultInterpreterPath": "/home/liqiankun/miniconda3/envs/ograg/bin/python",
+  "python.analysis.extraPaths": [
+    "${workspaceFolder}"
+  ],
+  "python.analysis.indexing": true,
+  "git.ignoreLimitWarning": true
+}

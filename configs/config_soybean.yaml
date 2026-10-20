@@ -1,0 +1,61 @@
+model:
+  api_base: https://dashscope.aliyuncs.com/compatible-mode/v1
+  api_key: sk-0c7707325f5941e296f105479592a743
+  deployment_name: qwen3.5-plus # -32k
+  api_type: openai
+  api_version: '2024-02-01' 
+  enable_thinking: True
+  # MODEL_NAME: gpt-4-32k
+
+embedding_model:
+  api_base: https://dashscope.aliyuncs.com/compatible-mode/v1
+  api_key: sk-0c7707325f5941e296f105479592a743
+  deployment_name: text-embedding-v4 # sentence-transformers/all-mpnet-base-v2
+  api_type: openai #huggingface
+  api_version: '2024-02-01' 
+
+data:
+  documents_dir: data/md/soybean
+  ontology_path: data/ontology/farm_cropcultivation_schema_ontology_jsonld.json
+  kg_storage_path: data/kg/soybean
+  index_dir: index_openai/vector_soybean
+  subdir: False
+  smart_pdf: True
+  full_text: True
+  chunk_size: 4096
+  
+query:
+  method: de-ontohypergraph-rag #kg-rag
+  batch_size: 10
+  mode: json
+  questions_file: 
+    # - data/md/soybean/questions/ragas/testset_10_0p0,0p0,1p0.csv 
+    # - data/md/soybean/questions/ragas/testset_10_0p0,1p0,0p0.csv 
+    # - data/md/soybean/questions/ragas/testset_10_0p5,0p25,0p25.csv 
+    # - data/md/soybean/questions/ragas/testset_10_0p25,0p5,0p25.csv 
+    # - data/md/soybean/questions/ragas/testset_10_0p25,0p25,0p5.csv 
+    # - data/md/soybean/questions/ragas/testset_10_1p0,0p0,0p0.csv
+    - data/kg/soybean/questions/ontodoc_ragas/testset_reasoning.csv
+  answers_file: /data/liqiankun/ograg/results/soybean/ragas_answers_graphrag.json
+  hyperparams: {}
+question_generator:
+  framework: ragas
+  test_size: 10
+  distr: 
+    simple: 1.0
+    reasoning: 0.0
+    multi_context: 0.0 
+
+evaluator:
+  eval_file: /data/liqiankun/ograg/results/soybean/ragas_answers_graphrag.json
+  reference_free: True
+  type: single
+  metrics: 
+    - answer_correctness
+    - faithfulness
+    - answer_similarity
+    - answer_relevancy
+    - context_relevancy
+    - context_precision
+    - context_recall
+    - context_entity_recall
