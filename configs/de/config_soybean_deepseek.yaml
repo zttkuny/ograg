@@ -1,0 +1,56 @@
+model:
+  api_base: https://api.deepseek.com
+  api_key:
+  deployment_name: deepseek-flash
+  api_type: openai
+  api_version: '2024-02-01'
+  enable_thinking: False
+  reasoning_effort: high
+
+embedding_model:
+  api_base: https://dashscope.aliyuncs.com/compatible-mode/v1
+  api_key:
+  deployment_name: text-embedding-v4
+  api_type: openai
+  api_version: '2024-02-01'
+
+data:
+  documents_dir: data/md/soybean
+  ontology_path: data/ontology/farm_cropcultivation_schema_ontology_jsonld.json
+  kg_storage_path: data/kg/soybean
+  index_dir: index_openai/vector_soybean
+  subdir: False
+  smart_pdf: True
+  full_text: True
+  chunk_size: 4096
+
+query:
+  method: de-ontohypergraph-rag
+  batch_size: 10
+  mode: json
+  questions_file:
+    - data/kg/soybean/questions/ontodoc_ragas/testset_reasoning.csv
+  answers_file: results/deepseek_flash_de_soybean/answers_de_ontohypergraph_rag.json
+  hyperparams: {}
+
+question_generator:
+  framework: ragas
+  test_size: 10
+  distr:
+    simple: 1.0
+    reasoning: 0.0
+    multi_context: 0.0
+
+evaluator:
+  eval_file: results/deepseek_flash_de_soybean/answers_de_ontohypergraph_rag.json
+  reference_free: True
+  type: single
+  metrics:
+    - answer_correctness
+    - faithfulness
+    - answer_similarity
+    - answer_relevancy
+    - context_relevancy
+    - context_precision
+    - context_recall
+    - context_entity_recall

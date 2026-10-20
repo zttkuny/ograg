@@ -16,6 +16,7 @@ from utils import (
     get_documents,
     load_llm_and_embeds,
 )
+from utils.token_usage import TokenUsageCollector, aggregate_usages
 from query_engine.ontograph_query_engine import OntoHyperGraphQueryEngine
 
 METHOD_NAME = "de-ontohypergraph-rag"
@@ -85,11 +86,20 @@ class SimpleChatPromptTemplate:
 
 
 class LangChainGeneratorAdapter:
-    def __init__(self, llm):
+    def __init__(
+        self,
+        llm,
+        usage_collector: Optional[TokenUsageCollector] = None,
+        usage_stage: str = "debate",
+    ):
         self._llm = llm
+        self._usage_collector = usage_collector
+        self._usage_stage = usage_stage
 
     def generate(self, prompt: str) -> List[str]:
         out = self._llm.invoke(prompt, max_tokens=MAX_TOKENS)
+        if self._usage_collector is not None:
+            self._usage_collector.add(out, self._usage_stage)
         content = getattr(out, "content", None)
         if content is None:
             return [str(out)]
@@ -256,6 +266,8 @@ class DEOntoHyperGraphRAGQueryEngine:
 
         self._llm = llm
         self._onto_engine = onto_engine
+        self._usage_collector = TokenUsageCollector()
+        self.last_token_usage = self._usage_collector.snapshot()
         self._retriever = OntoHyperGraphRetrieverAdapter(
             onto_engine=onto_engine,
             top_k=top_k,
@@ -263,7 +275,11 @@ class DEOntoHyperGraphRAGQueryEngine:
         )
         self._debate = OntologyGroundedRetrievalDebate(
             retriever=self._retriever,
-            generator=LangChainGeneratorAdapter(llm),
+            generator=LangChainGeneratorAdapter(
+                llm,
+                usage_collector=self._usage_collector,
+                usage_stage="debate",
+            ),
             prompt_template=SimpleChatPromptTemplate(),
             max_query_debate_rounds=max_query_debate_rounds,
             query_proponent_agent=1,
@@ -278,10 +294,12 @@ class DEOntoHyperGraphRAGQueryEngine:
         *,
         query_str: str,
         return_context: bool = False,
+        return_usage: bool = False,
         rules: Optional[List[str]] = None,
         **kwargs,
     ):
         rules = rules or []
+        self._usage_collector.reset()
         query_pool = self._debate.run_query_stage(query_str)
 
         contexts: List[str] = []
@@ -298,9 +316,15 @@ class DEOntoHyperGraphRAGQueryEngine:
             RAG_QUERY_PROMPT.format(context=contexts + rules, query_str=query_str),
             max_tokens=MAX_TOKENS,
         )
+        self._usage_collector.add(response, "answer")
+        self.last_token_usage = self._usage_collector.snapshot()
 
+        if return_context and return_usage:
+            return response, contexts, self.last_token_usage
         if return_context:
             return response, contexts
+        if return_usage:
+            return response, self.last_token_usage
         return response
 
 
@@ -404,12 +428,13 @@ if __name__ == "__main__":
         responses = []
         times = []
         retrieved_contexts = []
+        token_usages = []
 
-        # 逐个问题执行查询，并记录每条样本的耗时与检索上下文。
+        # 逐个问题执行查询，并记录每条样本的耗时、检索上下文与 token usage。
         for question in tqdm(questions):
             start_time = time.time()
-            response, retrieved_context = query_engine.query(
-                query_str=question, return_context=True, rules=rules
+            response, retrieved_context, token_usage = query_engine.query(
+                query_str=question, return_context=True, return_usage=True, rules=rules
             )
 
             # 不同底层 LLM/QueryEngine 返回对象的字段不完全一致，
@@ -425,11 +450,20 @@ if __name__ == "__main__":
             # 保存该问题的总耗时，以及生成答案时使用到的上下文。
             times.append(time.time() - start_time)
             retrieved_contexts.append(retrieved_context)
+            token_usages.append(token_usage)
 
-        # 将答案、检索上下文和耗时统一写入结果文件，供后续评测使用。
+        # 将答案、检索上下文、耗时和 token usage 统一写入结果文件。
         evaluator.write(
             config.query.answers_file,
             answer=responses,
             retrieved_context=retrieved_contexts,
             time=times,
+            token_usage=token_usages,
         )
+
+        token_usage_summary = aggregate_usages(token_usages)
+        token_usage_summary["questions"] = len(questions)
+        summary_file = os.path.join(answer_dir, "token_usage_summary.json")
+        with open(summary_file, "w") as f:
+            json.dump(token_usage_summary, f, indent=2, ensure_ascii=False)
+        print(json.dumps(token_usage_summary, indent=2, ensure_ascii=False))

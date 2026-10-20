@@ -1,0 +1,59 @@
+model:
+  api_base: https://api.deepseek.com
+  api_key:
+  deployment_name: deepseek-flash
+  api_type: openai
+  api_version: '2024-02-01'
+  enable_thinking: False
+  reasoning_effort: high
+
+embedding_model:
+  api_base: https://dashscope.aliyuncs.com/compatible-mode/v1
+  api_key:
+  deployment_name: text-embedding-v4
+  api_type: openai
+  api_version: '2024-02-01'
+
+data:
+  documents_dir: data/kg/news
+  ontology_path: data/ontology/snap_ontology.jsonld
+  kg_storage_path: data/kg/news
+  index_dir: index_openai/vector_news
+  subdir: False
+  smart_pdf: True
+  full_text: True
+  chunk_size: 4096
+
+query:
+  method: ontohypergraph-rag
+  hyperparams:
+    vector_index: False
+    top_k: 2
+    nodes_top_k: 5
+  batch_size: 10
+  mode: json
+  questions_file:
+    - data/kg/news/questions/ontodoc_ragas/testset500_0p0_1p0_0p0.csv
+  answers_file: results/news/deepseek_flash_ontodocragas_answers_ontohypergraph_rag.json
+
+question_generator:
+  framework: ragas
+  test_size: 10
+  distr:
+    simple: 1.0
+    reasoning: 0.0
+    multi_context: 0.0
+
+evaluator:
+  eval_file: results/news/deepseek_flash_ontodocragas_answers_ontohypergraph_rag_vector_indexFalse_top_k2_nodes_top_k5.json
+  reference_free: True
+  type: single
+  metrics:
+    - answer_correctness
+    - faithfulness
+    - answer_similarity
+    - answer_relevancy
+    - context_relevancy
+    - context_precision
+    - context_recall
+    - context_entity_recall

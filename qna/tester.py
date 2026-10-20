@@ -13,6 +13,8 @@ from ragas.metrics import (
 from ragas import evaluate
 from ragas.run_config import RunConfig
 
+from utils.token_usage import EvalTokenUsageCallback
+
 run_config = RunConfig(
     max_workers=1,
     timeout=600,
@@ -24,6 +26,7 @@ class RAGASTester:
         self.embeddings = embeddings
         self.metrics_names = metrics
         self.metrics = []
+        self.last_eval_token_usage = None
         self._load_metrics()
 
     def _load_metrics(self):
@@ -96,6 +99,7 @@ class RAGASTester:
             ragas_data['ground_truth'].append(item.get('ground_truth', ''))
 
         dataset = Dataset.from_dict(ragas_data)
+        usage_cb = EvalTokenUsageCallback()
         
         print("Starting Ragas evaluation...")
         results = evaluate(
@@ -103,10 +107,32 @@ class RAGASTester:
             metrics=self.metrics,
             llm=self.llm,
             embeddings=self.embeddings,
+            callbacks=[usage_cb],
             raise_exceptions=False,
             run_config=run_config,
             # Limit concurrency to avoid timeouts with proxy
             # max_workers=4 
+        )
+
+        token_usage_summary = usage_cb.snapshot()
+        token_usage_summary.update(
+            {
+                "scope": "eval",
+                "answer_file": file_path,
+                "metrics": self.metrics_names,
+                "questions": len(data),
+            }
+        )
+        self.last_eval_token_usage = token_usage_summary
+        print(
+            "Eval token usage: "
+            f"calls={token_usage_summary['calls']}, "
+            f"prompt={token_usage_summary['prompt_tokens']}, "
+            f"completion={token_usage_summary['completion_tokens']}, "
+            f"total={token_usage_summary['total_tokens']}, "
+            f"cache_hit={token_usage_summary['cache_hit_tokens']}, "
+            f"cache_miss={token_usage_summary['cache_miss_tokens']}, "
+            f"reasoning={token_usage_summary['reasoning_tokens']}"
         )
         
         if to_file:
@@ -114,6 +140,11 @@ class RAGASTester:
             df = results.to_pandas()
             df.to_csv(output_file, index=False)
             print(f"Ragas evaluation saved to {output_file}")
+
+            usage_file = file_path.replace('.json', '_eval_token_usage.json')
+            with open(usage_file, 'w') as f:
+                json.dump(token_usage_summary, f, indent=2, ensure_ascii=False)
+            print(f"Ragas token usage saved to {usage_file}")
             
         return results
 
