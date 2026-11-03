@@ -239,10 +239,27 @@ class OntoHyperGraph:
     def get_edge (self, edge_id: int):
         return self.edges[edge_id]
     
-    def retrieve_context(self, query_str: str, nodes_top_k: int=10, top_k: int=5, context_length=1024):
+    def retrieve_context(
+        self,
+        query_str: str,
+        nodes_top_k: int=10,
+        top_k: int=5,
+        context_length=1024,
+        return_scores: bool=False,
+    ):
         query_embedding = self.embed_model.embed_query(query_str)
         key_nodes, value_nodes = self.get_relevant_hypernodes(query_embedding, top_k=nodes_top_k)
         retrieved_nodes = key_nodes + value_nodes
+        retrieval_scores = []
+        if return_scores:
+            seen_nodes = set()
+            for node in retrieved_nodes:
+                node_id = (node.key, str(node.value))
+                if node_id in seen_nodes:
+                    continue
+                seen_nodes.add(node_id)
+                retrieval_scores.append(float(node.similarity(query_embedding, method='sum')))
+            retrieval_scores.sort(reverse=True)
         if self.chunks is not None:
             relevant_chunks = self.get_relevant_chunks(retrieved_nodes, top_k=top_k)
             relevant_context = '\n'.join(relevant_chunks)
@@ -250,6 +267,8 @@ class OntoHyperGraph:
             relevant_edges = self.get_relevant_hyperedges(retrieved_nodes, top_k=top_k)
             relevant_context = [edge.to_dict() for edge in relevant_edges]
             # relevant_context = [edge.to_text() for edge in relevant_edges]
+        if return_scores:
+            return retrieved_nodes, relevant_context, retrieval_scores
         return retrieved_nodes, relevant_context
         # query_embedding = self.embed_model.embed_query(query_str)
         # hypernodes_topsim = sorted(self.nodes, key=lambda x: x.similarity(query_embedding), reverse=True)
@@ -386,7 +405,27 @@ class OntoHyperGraphQueryEngine:
             return response, relevant_context
         return response
     
-    def retrieve_context(self, query_str, top_k=5, nodes_top_k: int=20, context_length: int=1024):
+    def retrieve_context(
+        self,
+        query_str,
+        top_k=5,
+        nodes_top_k: int=20,
+        context_length: int=1024,
+        return_scores: bool=False,
+    ):
+        if return_scores:
+            retrieved_nodes, relevant_context, retrieval_scores = self._onto_hypergraph.retrieve_context(
+                query_str,
+                nodes_top_k=nodes_top_k,
+                top_k=top_k,
+                context_length=context_length,
+                return_scores=True,
+            )
+            return retrieved_nodes, relevant_context, retrieval_scores
         retrieved_nodes, relevant_context = self._onto_hypergraph.retrieve_context(
-            query_str, nodes_top_k=nodes_top_k, top_k=top_k, context_length=context_length)
+            query_str,
+            nodes_top_k=nodes_top_k,
+            top_k=top_k,
+            context_length=context_length,
+        )
         return retrieved_nodes, relevant_context

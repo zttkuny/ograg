@@ -21,6 +21,7 @@ class RetrievalDebate:
         self.max_query_debate_rounds = max_query_debate_rounds
         self.max_query_similarity = max_query_similarity
         self.query_embedder = query_embedder
+        self.last_run_trace = {}
 
         self.agents_messages_query_stage = {}
         for i in range(query_proponent_agent):
@@ -28,20 +29,104 @@ class RetrievalDebate:
         for i in range(query_opponent_agent):
             self.agents_messages_query_stage[f"Opponent Agent {i}"] = []
 
-    def run_query_stage(self, question: str, *, record=None):
-        query_pool = {}
+    def _doc_keys(self, docs):
+        keys = set()
+        for doc in docs:
+            metadata = doc.get("metadata") if isinstance(doc, dict) else None
+            for key in (metadata or {}).get("keys") or []:
+                keys.add(str(key))
+        return keys
 
-        if self.max_query_debate_rounds == 0:
-            input_query = question
-            retrieval_results = self.retriever.search(input_query)
-            query_pool[input_query.strip()] = retrieval_results
-            return query_pool
+    def _pool_snapshot(self, query_pool):
+        keys = set()
+        docs_seen = set()
+        doc_count = 0
+        for docs in query_pool.values():
+            doc_count += len(docs)
+            keys.update(self._doc_keys(docs))
+            docs_seen.update(str(doc.get("contents", "")) for doc in docs)
+        return {
+            "queries": list(query_pool.keys()),
+            "doc_count": doc_count,
+            "docs": docs_seen,
+            "keys": sorted(keys),
+        }
+
+    def _initial_event(self, query, query_pool):
+        snapshot = self._pool_snapshot(query_pool)
+        return {
+            "round": 0,
+            "action": "initial",
+            "query": query,
+            "new_doc_count": len(snapshot["docs"]),
+            "removed_doc_count": 0,
+            "doc_delta": snapshot["doc_count"],
+            "new_keys": snapshot["keys"],
+            "doc_count": snapshot["doc_count"],
+            "key_count": len(snapshot["keys"]),
+        }
+
+    def _query_event(self, round_id, action, query, before, after):
+        before_keys = set(before["keys"])
+        after_keys = set(after["keys"])
+        before_docs = set(before["docs"])
+        after_docs = set(after["docs"])
+        return {
+            "round": round_id,
+            "action": action,
+            "query": query,
+            "new_doc_count": len(after_docs - before_docs),
+            "removed_doc_count": len(before_docs - after_docs),
+            "doc_delta": after["doc_count"] - before["doc_count"],
+            "new_keys": sorted(after_keys - before_keys),
+            "doc_count": after["doc_count"],
+            "key_count": len(after["keys"]),
+        }
+
+    def _finish(self, query_pool, rounds, stop_reason, events):
+        snapshot = self._pool_snapshot(query_pool)
+        self.last_run_trace = {
+            "rounds": rounds,
+            "stop_reason": stop_reason,
+            "events": events,
+            "final_queries": snapshot["queries"],
+            "final_doc_count": snapshot["doc_count"],
+            "final_keys": snapshot["keys"],
+        }
+        return query_pool
+
+    def run_query_stage(
+        self,
+        question: str,
+        *,
+        record=None,
+        initial_query_pool=None,
+        max_rounds=None,
+        zero_round_reason: str = "max_rounds_zero",
+    ):
+        query_pool = {}
+        self.last_run_trace = {}
 
         input_query = question
-        retrieval_results = self.retriever.search(input_query)
-        query_pool[input_query.strip()] = retrieval_results
+        if initial_query_pool is None:
+            retrieval_results = self.retriever.search(input_query)
+            query_pool[input_query.strip()] = retrieval_results
+        else:
+            query_pool = {
+                query: list(docs) for query, docs in initial_query_pool.items()
+            }
+            if not query_pool:
+                query_pool[input_query.strip()] = []
 
-        for round_id in range(self.max_query_debate_rounds):
+        events = [self._initial_event(input_query.strip(), query_pool)]
+        rounds_limit = (
+            self.max_query_debate_rounds if max_rounds is None else max(int(max_rounds), 0)
+        )
+
+        if rounds_limit == 0:
+            return self._finish(query_pool, 0, zero_round_reason, events)
+
+        for round_id in range(rounds_limit):
             agents_messages = {}
 
             for agent_name in self.agents_messages_query_stage:
@@ -72,23 +157,46 @@ class RetrievalDebate:
                 record[f"QueryStage_Moderator_Round{round_id}_Output"] = moderator_output
 
             if "Proponent" in moderator_output:
-                return query_pool
+                return self._finish(query_pool, round_id + 1, "proponent_win", events)
 
             opponent_output = agents_messages["Opponent Agent 0"][1]
             action = self.parse_opponent_action(opponent_output)
             if action is None:
-                return query_pool
+                return self._finish(query_pool, round_id + 1, "unparsable_action", events)
             if self.should_stop_for_similar_query(query_pool, action["new_query"]):
-                return query_pool
+                snapshot = self._pool_snapshot(query_pool)
+                events.append(
+                    {
+                        "round": round_id + 1,
+                        "action": "similar_query_rejected",
+                        "query": action["new_query"],
+                        "new_doc_count": 0,
+                        "removed_doc_count": 0,
+                        "doc_delta": 0,
+                        "new_keys": [],
+                        "doc_count": snapshot["doc_count"],
+                        "key_count": len(snapshot["keys"]),
+                    }
+                )
+                return self._finish(query_pool, round_id + 1, "similar_query", events)
 
+            before = self._pool_snapshot(query_pool)
             query_pool_tmp = self.maintain_query_pool(query_pool, action)
             if query_pool_tmp is None:
-                return query_pool
+                return self._finish(
+                    query_pool, round_id + 1, "query_pool_update_failed", events
+                )
+            after = self._pool_snapshot(query_pool_tmp)
+            events.append(
+                self._query_event(
+                    round_id + 1, action["type"], action["new_query"], before, after
+                )
+            )
             if self.should_stop_after_round(query_pool, query_pool_tmp):
-                return query_pool
+                return self._finish(query_pool_tmp, round_id + 1, "min_new_keys", events)
             query_pool = query_pool_tmp
 
-        return query_pool
+        return self._finish(query_pool, rounds_limit, "max_rounds", events)
 
     def _query_stage_system_message(self, agent_name: str):
         if "Proponent" in agent_name:

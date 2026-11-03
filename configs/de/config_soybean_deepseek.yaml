@@ -26,6 +26,15 @@ data:
 
 query:
   method: de-ontohypergraph-rag
+  adaptive_evidence: false
+  adaptive_routing: false
+  adaptive_route_policy: v1
+  adaptive_direct_slot_coverage: 0.8
+  adaptive_full_slot_coverage: 0.5
+  adaptive_direct_max_complexity: 1
+  adaptive_full_min_complexity: 3
+  adaptive_light_max_rounds: 1
+  adaptive_margin_top_k: 5
   batch_size: 10
   mode: json
   questions_file:

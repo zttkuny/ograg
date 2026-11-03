@@ -8,6 +8,15 @@ import pandas as pd
 from llama_index.core.retrievers import VectorIndexRetriever
 from tqdm import tqdm
 
+from adaptive_evidence import (
+    AdaptiveEvidenceTracer,
+    build_adaptive_features,
+    build_adaptive_trace,
+    compute_query_complexity,
+)
+from imad_features import FEATURE_VERSION, build_imad_features, extract_contexts
+from imad_probe import build_probe_prompt, parse_probe_response
+from imad_router import IMADRouter, create_router_from_config
 from retrieve_debate import RetrievalDebate
 from utils import (
     create_or_load_index,
@@ -31,6 +40,14 @@ Question: {query_str}
 
 Answer:
 """
+
+
+class ProbeAnswer:
+    def __init__(self, content: str):
+        self.content = content
+
+    def __str__(self):
+        return self.content
 
 
 class QnA_IO:
@@ -118,13 +135,7 @@ class OntoHyperGraphRetrieverAdapter:
         self._top_k = top_k
         self._nodes_top_k = nodes_top_k
 
-    def search(self, query: str) -> List[Dict[str, Any]]:
-        _, relevant_context = self._onto_engine.retrieve_context(
-            query,
-            top_k=self._top_k,
-            nodes_top_k=self._nodes_top_k,
-        )
-
+    def _build_docs(self, query: str, relevant_context) -> List[Dict[str, Any]]:
         docs: List[Dict[str, Any]] = []
 
         if isinstance(relevant_context, list):
@@ -166,6 +177,24 @@ class OntoHyperGraphRetrieverAdapter:
                 pass
 
         return docs
+
+    def search(self, query: str) -> List[Dict[str, Any]]:
+        _, relevant_context = self._onto_engine.retrieve_context(
+            query,
+            top_k=self._top_k,
+            nodes_top_k=self._nodes_top_k,
+        )
+        return self._build_docs(query, relevant_context)
+
+    def search_with_metadata(self, query: str):
+        _, relevant_context, retrieval_scores = self._onto_engine.retrieve_context(
+            query,
+            top_k=self._top_k,
+            nodes_top_k=self._nodes_top_k,
+            return_scores=True,
+        )
+        docs = self._build_docs(query, relevant_context)
+        return docs, {"retrieval_scores": retrieval_scores}
 
 
 class OntologyGroundedRetrievalDebate(RetrievalDebate):
@@ -256,6 +285,28 @@ class DEOntoHyperGraphRAGQueryEngine:
         top_k: int = 5,
         min_new_keys_per_round: int = 0,
         max_query_similarity: float = None,
+        adaptive_evidence: bool = False,
+        adaptive_trace_file: Optional[str] = None,
+        adaptive_cost_summary_file: Optional[str] = None,
+        adaptive_mode: str = "FULL",
+        adaptive_pricing: Optional[Dict[str, float]] = None,
+        adaptive_routing: bool = False,
+        adaptive_route_policy: str = "v1",
+        adaptive_direct_slot_coverage: float = 0.8,
+        adaptive_full_slot_coverage: float = 0.5,
+        adaptive_direct_max_complexity: int = 1,
+        adaptive_full_min_complexity: int = 3,
+        adaptive_light_max_rounds: int = 1,
+        adaptive_margin_top_k: int = 5,
+        adaptive_imad_probe: bool = False,
+        adaptive_imad_artifact_dir: Optional[str] = None,
+        adaptive_imad_allow_heuristic: bool = False,
+        adaptive_imad_conservative_override: bool = False,
+        adaptive_imad_direct_threshold: Optional[float] = None,
+        adaptive_imad_light_threshold: Optional[float] = None,
+        adaptive_imad_max_context_chars: int = 12000,
+        adaptive_imad_probe_max_tokens: int = 1024,
+        adaptive_force_mode: Optional[str] = None,
     ):
         onto_engine = OntoHyperGraphQueryEngine.from_ontology_path(
             ontology_nodes_path=ontology_nodes_path,
@@ -288,6 +339,163 @@ class DEOntoHyperGraphRAGQueryEngine:
             max_query_similarity=max_query_similarity,
             query_embedder=embed_model,
         )
+        self._adaptive_mode = adaptive_mode
+        self._adaptive_routing = adaptive_routing
+        self._adaptive_route_policy = adaptive_route_policy
+        self._adaptive_direct_slot_coverage = adaptive_direct_slot_coverage
+        self._adaptive_full_slot_coverage = adaptive_full_slot_coverage
+        self._adaptive_direct_max_complexity = adaptive_direct_max_complexity
+        self._adaptive_full_min_complexity = adaptive_full_min_complexity
+        self._adaptive_light_max_rounds = adaptive_light_max_rounds
+        self._adaptive_margin_top_k = adaptive_margin_top_k
+        self._adaptive_imad_probe = bool(adaptive_imad_probe)
+        self._adaptive_imad_conservative_override = bool(adaptive_imad_conservative_override)
+        self._adaptive_imad_max_context_chars = int(adaptive_imad_max_context_chars)
+        self._adaptive_imad_probe_max_tokens = int(adaptive_imad_probe_max_tokens)
+        self._adaptive_force_mode = (
+            str(adaptive_force_mode).upper() if adaptive_force_mode else None
+        )
+        if self._adaptive_force_mode not in {None, "DIRECT", "LIGHT", "FULL"}:
+            raise ValueError("adaptive_force_mode must be DIRECT, LIGHT, or FULL")
+        self._imad_router = None
+        if str(self._adaptive_route_policy).lower() == "v3_imad":
+            self._imad_router = self._build_imad_router(
+                artifact_dir=adaptive_imad_artifact_dir,
+                allow_heuristic=adaptive_imad_allow_heuristic,
+                direct_threshold=adaptive_imad_direct_threshold,
+                light_threshold=adaptive_imad_light_threshold,
+            )
+        self._adaptive_tracer = None
+        self._adaptive_query_count = 0
+        self.last_adaptive_trace = None
+        self.last_route = None
+        if adaptive_evidence:
+            self._adaptive_tracer = AdaptiveEvidenceTracer(
+                trace_file=adaptive_trace_file or "adaptive_trace.jsonl",
+                cost_summary_file=adaptive_cost_summary_file or "cost_summary.json",
+                pricing=adaptive_pricing,
+            )
+
+    @staticmethod
+    def _build_imad_router(
+        *,
+        artifact_dir: Optional[str],
+        allow_heuristic: bool,
+        direct_threshold: Optional[float],
+        light_threshold: Optional[float],
+    ) -> Optional[IMADRouter]:
+        class _RouterConfig:
+            def __init__(self):
+                self.adaptive_imad_artifact_dir = artifact_dir
+                self.adaptive_imad_allow_heuristic = allow_heuristic
+
+        router = create_router_from_config(_RouterConfig())
+        if router is None:
+            return None
+        if direct_threshold is not None:
+            router.direct_threshold = float(direct_threshold)
+        if light_threshold is not None:
+            router.light_threshold = float(light_threshold)
+        return router
+
+    def _route_v3_imad(
+        self,
+        *,
+        question: str,
+        baseline_docs: List[Dict[str, Any]],
+        retrieval_metadata: Dict[str, Any],
+        v2_route: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        contexts = extract_contexts(baseline_docs)
+        probe = None
+        probe_meta: Dict[str, Any] = {
+            "used": False,
+            "parse_ok": False,
+            "error": None,
+            "prompt_chars": 0,
+            "raw_response_chars": 0,
+        }
+        if self._adaptive_imad_probe:
+            prompt = build_probe_prompt(
+                question,
+                contexts,
+                max_context_chars=self._adaptive_imad_max_context_chars,
+            )
+            probe_meta["used"] = True
+            probe_meta["prompt_chars"] = len(prompt)
+            try:
+                response = self._llm.invoke(
+                    prompt,
+                    max_tokens=self._adaptive_imad_probe_max_tokens,
+                )
+                self._usage_collector.add(response, "probe")
+                content = getattr(response, "content", None)
+                raw_text = content if content is not None else str(response)
+                probe_meta["raw_response_chars"] = len(str(raw_text))
+                probe, probe_error = parse_probe_response(raw_text)
+                probe_meta["parse_ok"] = probe is not None and not probe_error
+                probe_meta["error"] = probe_error
+            except Exception as exc:
+                probe_meta["error"] = f"{type(exc).__name__}: {exc}"
+
+        features = build_imad_features(
+            question=question,
+            docs=baseline_docs,
+            retrieval_scores=retrieval_metadata.get("retrieval_scores"),
+            probe=probe if probe_meta["parse_ok"] else None,
+            top_k=self._adaptive_margin_top_k,
+            query_complexity=v2_route.get("features", {}).get("query_complexity"),
+        )
+
+        decision = None
+        probe_usable = probe_meta["parse_ok"] or not self._adaptive_imad_probe
+        if self._imad_router is not None and probe_usable:
+            decision = self._imad_router.decide(
+                features,
+                fallback_mode=v2_route["mode"],
+            )
+        if decision is None:
+            decision = {
+                "mode": v2_route["mode"],
+                "route_reason": "imad_unavailable_or_probe_failed_fallback_v2_guard",
+                "p_direct": None,
+                "p_light": None,
+                "hesitation": None,
+                "threshold": None,
+                "router_source": "v2_guard",
+                "fallback_used": True,
+            }
+        if self._adaptive_imad_conservative_override and decision.get("mode") != "DIRECT":
+            original_mode = decision.get("mode")
+            decision = {
+                **decision,
+                "mode": v2_route["mode"],
+                "route_reason": "imad_conservative_override_v2_guard",
+                "router_source": "conservative_v2_guard",
+                "fallback_used": True,
+                "model_mode": original_mode,
+            }
+
+        probe_answer = ""
+        if isinstance(probe, dict):
+            probe_answer = str(probe.get("final_answer") or "").strip()
+
+        return {
+            "mode": decision["mode"],
+            "route_reason": decision["route_reason"],
+            "policy": "v3_imad",
+            "features": {
+                **v2_route.get("features", {}),
+                "imad": features,
+                "imad_feature_version": FEATURE_VERSION,
+                "imad_decision": decision,
+                "imad_probe": probe_meta,
+                "v2_guard_mode": v2_route["mode"],
+                "v2_guard_reason": v2_route["route_reason"],
+                "probe_answer_chars": len(probe_answer),
+            },
+            "_probe_answer": probe_answer,
+        }
 
     def query(
         self,
@@ -296,11 +504,93 @@ class DEOntoHyperGraphRAGQueryEngine:
         return_context: bool = False,
         return_usage: bool = False,
         rules: Optional[List[str]] = None,
+        query_id: Optional[str] = None,
         **kwargs,
     ):
+        start_time = time.time()
         rules = rules or []
         self._usage_collector.reset()
-        query_pool = self._debate.run_query_stage(query_str)
+
+        use_baseline_metadata = self._adaptive_routing or self._adaptive_tracer is not None
+        if use_baseline_metadata:
+            baseline_docs, retrieval_metadata = self._retriever.search_with_metadata(query_str)
+        else:
+            baseline_docs = self._retriever.search(query_str)
+            retrieval_metadata = {}
+        baseline_pool = {query_str.strip(): baseline_docs}
+
+        if use_baseline_metadata:
+            if str(self._adaptive_route_policy).lower() == "v3_imad":
+                v2_route = build_adaptive_features(
+                    question=query_str,
+                    docs=baseline_docs,
+                    retrieval_scores=retrieval_metadata.get("retrieval_scores"),
+                    margin_top_k=self._adaptive_margin_top_k,
+                    policy="v2_guard",
+                    direct_slot_coverage=self._adaptive_direct_slot_coverage,
+                    full_slot_coverage=self._adaptive_full_slot_coverage,
+                    direct_max_complexity=self._adaptive_direct_max_complexity,
+                    full_min_complexity=self._adaptive_full_min_complexity,
+                )
+                if self._adaptive_routing:
+                    route = self._route_v3_imad(
+                        question=query_str,
+                        baseline_docs=baseline_docs,
+                        retrieval_metadata=retrieval_metadata,
+                        v2_route=v2_route,
+                    )
+                else:
+                    route = v2_route
+            else:
+                route = build_adaptive_features(
+                    question=query_str,
+                    docs=baseline_docs,
+                    retrieval_scores=retrieval_metadata.get("retrieval_scores"),
+                    margin_top_k=self._adaptive_margin_top_k,
+                    policy=self._adaptive_route_policy,
+                    direct_slot_coverage=self._adaptive_direct_slot_coverage,
+                    full_slot_coverage=self._adaptive_full_slot_coverage,
+                    direct_max_complexity=self._adaptive_direct_max_complexity,
+                    full_min_complexity=self._adaptive_full_min_complexity,
+                )
+        else:
+            route = {
+                "mode": self._adaptive_mode,
+                "route_reason": "routing_disabled",
+                "features": {
+                    "slot_coverage": None,
+                    "answer_support": None,
+                    "query_complexity": compute_query_complexity(query_str),
+                    "retrieval_margin": None,
+                },
+            }
+        if not self._adaptive_routing:
+            route["mode"] = self._adaptive_mode
+            route["route_reason"] = "routing_disabled"
+        if self._adaptive_force_mode is not None:
+            route["original_mode"] = route.get("mode")
+            route["mode"] = self._adaptive_force_mode
+            route["route_reason"] = "forced_mode"
+        self.last_route = route
+
+        rounds_override = None
+        zero_round_reason = "max_rounds_zero"
+        if self._adaptive_routing:
+            if route["mode"] == "DIRECT":
+                rounds_override = 0
+                zero_round_reason = "direct_route"
+            elif route["mode"] == "LIGHT":
+                rounds_override = min(
+                    max(self._adaptive_light_max_rounds, 1),
+                    self._debate.max_query_debate_rounds,
+                )
+
+        query_pool = self._debate.run_query_stage(
+            query_str,
+            initial_query_pool=baseline_pool,
+            max_rounds=rounds_override,
+            zero_round_reason=zero_round_reason,
+        )
 
         contexts: List[str] = []
         seen: Set[str] = set()
@@ -312,12 +602,36 @@ class DEOntoHyperGraphRAGQueryEngine:
                     seen.add(c)
                     contexts.append(c)
 
-        response = self._llm.invoke(
-            RAG_QUERY_PROMPT.format(context=contexts + rules, query_str=query_str),
-            max_tokens=MAX_TOKENS,
-        )
-        self._usage_collector.add(response, "answer")
+        probe_answer = route.pop("_probe_answer", "") if isinstance(route, dict) else ""
+        if self._adaptive_routing and route.get("mode") == "DIRECT" and probe_answer:
+            response = ProbeAnswer(probe_answer)
+            route.setdefault("features", {})["answer_source"] = "imad_probe"
+        else:
+            response = self._llm.invoke(
+                RAG_QUERY_PROMPT.format(context=contexts + rules, query_str=query_str),
+                max_tokens=MAX_TOKENS,
+            )
+            self._usage_collector.add(response, "answer")
+            route.setdefault("features", {})["answer_source"] = "llm"
         self.last_token_usage = self._usage_collector.snapshot()
+
+        if self._adaptive_tracer is not None:
+            self._adaptive_query_count += 1
+            trace = build_adaptive_trace(
+                qid=query_id or f"Q{self._adaptive_query_count:03d}",
+                question=query_str,
+                mode=route["mode"],
+                features={
+                    **route["features"],
+                    "route_reason": route["route_reason"],
+                },
+                debate_trace=self._debate.last_run_trace,
+                contexts=contexts,
+                usage=self.last_token_usage,
+                elapsed_sec=time.time() - start_time,
+                answer=response,
+            )
+            self.last_adaptive_trace = self._adaptive_tracer.record(trace)
 
         if return_context and return_usage:
             return response, contexts, self.last_token_usage
@@ -326,6 +640,12 @@ class DEOntoHyperGraphRAGQueryEngine:
         if return_usage:
             return response, self.last_token_usage
         return response
+
+
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
 
 
 def _load_rules(config) -> List[str]:
@@ -378,6 +698,71 @@ if __name__ == "__main__":
     if max_query_similarity is not None:
         max_query_similarity = float(max_query_similarity)
 
+    answer_dir = os.path.dirname(config.query.answers_file) or "."
+    adaptive_evidence = getattr(config.query, "adaptive_evidence", False)
+    if isinstance(adaptive_evidence, str):
+        adaptive_evidence = adaptive_evidence.lower() in {"1", "true", "yes", "on"}
+    adaptive_routing = getattr(config.query, "adaptive_routing", False)
+    if isinstance(adaptive_routing, str):
+        adaptive_routing = adaptive_routing.lower() in {"1", "true", "yes", "on"}
+    adaptive_route_policy = str(
+        getattr(config.query, "adaptive_route_policy", "v1")
+    ).strip().lower()
+    adaptive_direct_slot_coverage = float(
+        getattr(config.query, "adaptive_direct_slot_coverage", 0.8)
+    )
+    adaptive_full_slot_coverage = float(
+        getattr(config.query, "adaptive_full_slot_coverage", 0.5)
+    )
+    adaptive_direct_max_complexity = int(
+        getattr(config.query, "adaptive_direct_max_complexity", 1)
+    )
+    adaptive_full_min_complexity = int(
+        getattr(config.query, "adaptive_full_min_complexity", 3)
+    )
+    adaptive_light_max_rounds = int(
+        getattr(config.query, "adaptive_light_max_rounds", 1)
+    )
+    adaptive_margin_top_k = int(getattr(config.query, "adaptive_margin_top_k", 5))
+    adaptive_imad_probe = _as_bool(getattr(config.query, "adaptive_imad_probe", False))
+    adaptive_imad_artifact_dir = getattr(config.query, "adaptive_imad_artifact_dir", None)
+    if adaptive_imad_artifact_dir:
+        adaptive_imad_artifact_dir = os.path.abspath(str(adaptive_imad_artifact_dir))
+    adaptive_imad_allow_heuristic = _as_bool(
+        getattr(config.query, "adaptive_imad_allow_heuristic", False)
+    )
+    adaptive_imad_conservative_override = _as_bool(
+        getattr(config.query, "adaptive_imad_conservative_override", False)
+    )
+    adaptive_imad_direct_threshold = getattr(
+        config.query, "adaptive_imad_direct_threshold", None
+    )
+    if adaptive_imad_direct_threshold is not None:
+        adaptive_imad_direct_threshold = float(adaptive_imad_direct_threshold)
+    adaptive_imad_light_threshold = getattr(
+        config.query, "adaptive_imad_light_threshold", None
+    )
+    if adaptive_imad_light_threshold is not None:
+        adaptive_imad_light_threshold = float(adaptive_imad_light_threshold)
+    adaptive_imad_max_context_chars = int(
+        getattr(config.query, "adaptive_imad_max_context_chars", 12000)
+    )
+    adaptive_imad_probe_max_tokens = int(
+        getattr(config.query, "adaptive_imad_probe_max_tokens", 1024)
+    )
+    adaptive_force_mode = getattr(config.query, "adaptive_force_mode", None)
+    if adaptive_force_mode:
+        adaptive_force_mode = str(adaptive_force_mode).strip().upper()
+    adaptive_trace_file = getattr(config.query, "adaptive_trace_file", None)
+    adaptive_cost_summary_file = getattr(config.query, "adaptive_cost_summary_file", None)
+    if adaptive_evidence:
+        adaptive_trace_file = adaptive_trace_file or os.path.join(
+            answer_dir, "adaptive_trace.jsonl"
+        )
+        adaptive_cost_summary_file = adaptive_cost_summary_file or os.path.join(
+            answer_dir, "cost_summary.json"
+        )
+
     query_engine = DEOntoHyperGraphRAGQueryEngine(
         llm=llm,
         embed_model=embeddings,
@@ -388,6 +773,26 @@ if __name__ == "__main__":
         top_k=top_k,
         min_new_keys_per_round=min_new_keys_per_round,
         max_query_similarity=max_query_similarity,
+        adaptive_evidence=adaptive_evidence,
+        adaptive_trace_file=adaptive_trace_file,
+        adaptive_cost_summary_file=adaptive_cost_summary_file,
+        adaptive_routing=adaptive_routing,
+        adaptive_route_policy=adaptive_route_policy,
+        adaptive_direct_slot_coverage=adaptive_direct_slot_coverage,
+        adaptive_full_slot_coverage=adaptive_full_slot_coverage,
+        adaptive_direct_max_complexity=adaptive_direct_max_complexity,
+        adaptive_full_min_complexity=adaptive_full_min_complexity,
+        adaptive_light_max_rounds=adaptive_light_max_rounds,
+        adaptive_margin_top_k=adaptive_margin_top_k,
+        adaptive_imad_probe=adaptive_imad_probe,
+        adaptive_imad_artifact_dir=adaptive_imad_artifact_dir,
+        adaptive_imad_allow_heuristic=adaptive_imad_allow_heuristic,
+        adaptive_imad_conservative_override=adaptive_imad_conservative_override,
+        adaptive_imad_direct_threshold=adaptive_imad_direct_threshold,
+        adaptive_imad_light_threshold=adaptive_imad_light_threshold,
+        adaptive_imad_max_context_chars=adaptive_imad_max_context_chars,
+        adaptive_imad_probe_max_tokens=adaptive_imad_probe_max_tokens,
+        adaptive_force_mode=adaptive_force_mode,
     )
 
     if len(config.query.questions_file) == 0:
@@ -424,6 +829,7 @@ if __name__ == "__main__":
         evaluator = QnA_IO()
         evaluator.read(config.query.questions_file)
         questions = evaluator.data["question"]
+        source_qids = list(evaluator.data["qid"]) if "qid" in evaluator.data else None
 
         responses = []
         times = []
@@ -431,10 +837,19 @@ if __name__ == "__main__":
         token_usages = []
 
         # 逐个问题执行查询，并记录每条样本的耗时、检索上下文与 token usage。
-        for question in tqdm(questions):
+        for question_index, question in enumerate(tqdm(questions), start=1):
             start_time = time.time()
+            query_id = f"Q{question_index:03d}"
+            if source_qids is not None:
+                source_qid = source_qids[question_index - 1]
+                if pd.notna(source_qid) and str(source_qid).strip():
+                    query_id = str(source_qid).strip()
             response, retrieved_context, token_usage = query_engine.query(
-                query_str=question, return_context=True, return_usage=True, rules=rules
+                query_str=question,
+                return_context=True,
+                return_usage=True,
+                rules=rules,
+                query_id=query_id,
             )
 
             # 不同底层 LLM/QueryEngine 返回对象的字段不完全一致，
@@ -467,3 +882,6 @@ if __name__ == "__main__":
         with open(summary_file, "w") as f:
             json.dump(token_usage_summary, f, indent=2, ensure_ascii=False)
         print(json.dumps(token_usage_summary, indent=2, ensure_ascii=False))
+        if adaptive_evidence:
+            print(f"Adaptive trace saved to {adaptive_trace_file}")
+            print(f"Adaptive cost summary saved to {adaptive_cost_summary_file}")
